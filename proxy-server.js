@@ -31,10 +31,13 @@ function setCors(res) {
 }
 
 function proxyRequest(targetUrl, clientIp, res) {
+  console.log('Attempting to proxy target:', targetUrl);
+
   let parsedTarget;
   try {
     parsedTarget = new URL(targetUrl);
   } catch {
+    console.error('Invalid target URL:', targetUrl);
     res.writeHead(400);
     res.end('Invalid URL');
     return;
@@ -42,6 +45,7 @@ function proxyRequest(targetUrl, clientIp, res) {
 
   const hostAllowed = ALLOWED_HOSTS.some(h => parsedTarget.hostname.includes(h));
   if (!hostAllowed) {
+    console.warn('Host not allowed:', parsedTarget.hostname);
     res.writeHead(403);
     res.end('Host not allowed');
     return;
@@ -102,6 +106,7 @@ function proxyRequest(targetUrl, clientIp, res) {
   });
 
   proxyReq.on('error', (err) => {
+    console.error('Proxy fetch error for', targetUrl, err);
     res.writeHead(502);
     res.end('Proxy error: ' + err.message);
   });
@@ -116,10 +121,19 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Simple health check
+  if (req.url === '/' || req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('OK - proxy is running');
+    return;
+  }
+
   if (req.url.startsWith('/api/proxy')) {
     const urlObj = new URL(req.url, `http://${req.headers.host}`);
     const targetUrl = urlObj.searchParams.get('url');
     const clientIp = urlObj.searchParams.get('ip') || '';
+
+    console.log('Incoming proxy request for:', targetUrl, 'clientIp:', clientIp || 'none');
 
     if (!targetUrl) {
       res.writeHead(400);
@@ -135,6 +149,6 @@ const server = http.createServer((req, res) => {
   res.end('Not found. Use /api/proxy?url=...');
 });
 
-server.listen(PORT, () => {
-  console.log(`Twitch proxy listening on port ${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Twitch proxy listening on port ${PORT} (bound to 0.0.0.0)`);
 });
