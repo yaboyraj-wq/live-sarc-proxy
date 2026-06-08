@@ -133,6 +133,89 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.url.startsWith('/api/stream')) {
+    const urlObj = new URL(req.url, `http://${req.headers.host}`);
+    const channel = urlObj.searchParams.get('channel')?.toLowerCase().replace(/[^a-z0-9_]/g, '').trim();
+    const clientIp = urlObj.searchParams.get('ip') || '';
+
+    if (!channel || channel.length < 2 || channel.length > 25) {
+      setCors(res);
+      res.writeHead(400);
+      res.end('Invalid channel name. Must be 2–25 characters.');
+      return;
+    }
+
+    (async () => {
+      try {
+        const gqlRes = await fetch('https://gql.twitch.tv/gql', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Tesla) AppleWebKit/537.36',
+            'Origin': 'https://www.twitch.tv',
+            'Referer': 'https://www.twitch.tv/',
+            ...(clientIp ? { 'X-Forwarded-For': clientIp } : {}),
+          },
+          body: JSON.stringify([
+            {
+              operationName: 'PlaybackAccessToken',
+              variables: {
+                isLive: true,
+                login: channel,
+                isVod: false,
+                vodID: '',
+                playerType: 'site',
+              },
+              extensions: {
+                persistedQuery: {
+                  version: 1,
+                  sha256Hash: '0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712',
+                },
+              },
+            },
+          ]),
+        });
+
+        if (!gqlRes.ok) {
+          throw new Error(`Twitch GQL returned ${gqlRes.status}`);
+        }
+
+        const [gqlBody] = await gqlRes.json();
+        const token = gqlBody?.data?.streamPlaybackAccessToken;
+
+        if (!token?.signature || !token?.value) {
+          setCors(res);
+          res.writeHead(404);
+          res.end('Channel is offline or does not exist.');
+          return;
+        }
+
+        const params = new URLSearchParams({
+          sig: token.signature,
+          token: token.value,
+          allow_source: 'true',
+          allow_spectre: 'true',
+          allow_audio_only: 'true',
+          fast_bread: 'true',
+          p: String(Math.floor(Math.random() * 999999)),
+        });
+
+        const m3u8Url = `https://usher.twitchapps.com/hls/${channel}.m3u8?${params}`;
+
+        setCors(res);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ m3u8Url, channel }));
+      } catch (err) {
+        console.error('Stream error for', channel, err);
+        setCors(res);
+        res.writeHead(502);
+        res.end('Proxy error: ' + err.message);
+      }
+    })();
+    return;
+  }
+
   if (req.url.startsWith('/api/proxy')) {
     const urlObj = new URL(req.url, `http://${req.headers.host}`);
     const targetUrl = urlObj.searchParams.get('url');
