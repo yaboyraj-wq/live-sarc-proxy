@@ -76,7 +76,8 @@ function proxyRequest(targetUrl, clientIp, res) {
 
   const lib = targetUrl.startsWith('https') ? https : http;
 
-  const proxyReq = lib.get(targetUrl, { headers }, (proxyRes) => {
+  // family: 4 forces IPv4 — helps with some DNS/ENOTFOUND issues on PaaS
+  const proxyReq = lib.get(targetUrl, { headers, family: 4 }, (proxyRes) => {
     const contentType = proxyRes.headers['content-type'] || '';
     const isPlaylist = contentType.includes('mpegurl') || contentType.includes('m3u8') || targetUrl.includes('.m3u8');
 
