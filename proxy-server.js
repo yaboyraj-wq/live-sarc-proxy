@@ -12,6 +12,10 @@
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
+const dns = require('dns');
+
+// Use public DNS resolvers (helps with some container DNS issues on PaaS like Railway)
+dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
 
 const ALLOWED_HOSTS = [
   'usher.twitchapps.com',
@@ -90,16 +94,16 @@ function proxyRequest(targetUrl, clientIp, res) {
           return line;
         }).join('\n');
 
+        setCors(res);
         res.writeHead(200, {
           'Content-Type': 'application/vnd.apple.mpegurl',
-          ...Object.fromEntries(Object.entries(setCors({})).map(([k,v]) => [k.toLowerCase(), v])),
         });
         res.end(rewritten);
       });
     } else {
+      setCors(res);
       res.writeHead(proxyRes.statusCode, {
         'Content-Type': contentType || 'video/mp2t',
-        ...Object.fromEntries(Object.entries(setCors({})).map(([k,v]) => [k.toLowerCase(), v])),
       });
       proxyRes.pipe(res);
     }
