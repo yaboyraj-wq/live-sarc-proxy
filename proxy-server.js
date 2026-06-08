@@ -42,6 +42,7 @@ function proxyRequest(targetUrl, clientIp, res) {
     parsedTarget = new URL(targetUrl);
   } catch {
     console.error('Invalid target URL:', targetUrl);
+    setCors(res);
     res.writeHead(400);
     res.end('Invalid URL');
     return;
@@ -50,6 +51,7 @@ function proxyRequest(targetUrl, clientIp, res) {
   const hostAllowed = ALLOWED_HOSTS.some(h => parsedTarget.hostname.includes(h));
   if (!hostAllowed) {
     console.warn('Host not allowed:', parsedTarget.hostname);
+    setCors(res);
     res.writeHead(403);
     res.end('Host not allowed');
     return;
@@ -75,45 +77,72 @@ function proxyRequest(targetUrl, clientIp, res) {
   }
 
   const lib = targetUrl.startsWith('https') ? https : http;
+  const parsed = new URL(targetUrl);
 
-  // family: 4 forces IPv4 — helps with some DNS/ENOTFOUND issues on PaaS
-  const proxyReq = lib.get(targetUrl, { headers, family: 4 }, (proxyRes) => {
-    const contentType = proxyRes.headers['content-type'] || '';
-    const isPlaylist = contentType.includes('mpegurl') || contentType.includes('m3u8') || targetUrl.includes('.m3u8');
-
-    if (isPlaylist) {
-      let body = '';
-      proxyRes.on('data', chunk => body += chunk);
-      proxyRes.on('end', () => {
-        const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
-        const rewritten = body.split('\n').map(line => {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith('#')) return line;
-          if (!trimmed.startsWith('http')) {
-            return baseUrl + trimmed;
-          }
-          return line;
-        }).join('\n');
-
-        setCors(res);
-        res.writeHead(200, {
-          'Content-Type': 'application/vnd.apple.mpegurl',
-        });
-        res.end(rewritten);
-      });
-    } else {
+  // Pre-resolve with our public DNS and family 4 to bypass container DNS issues
+  dns.lookup(parsed.hostname, { family: 4 }, (lookupErr, address) => {
+    if (lookupErr) {
+      console.error('DNS lookup failed for', parsed.hostname, lookupErr);
       setCors(res);
-      res.writeHead(proxyRes.statusCode, {
-        'Content-Type': contentType || 'video/mp2t',
-      });
-      proxyRes.pipe(res);
+      res.writeHead(502);
+      res.end('Proxy error: DNS lookup failed for ' + parsed.hostname);
+      return;
     }
-  });
 
-  proxyReq.on('error', (err) => {
-    console.error('Proxy fetch error for', targetUrl, err);
-    res.writeHead(502);
-    res.end('Proxy error: ' + err.message);
+    console.log('Resolved', parsed.hostname, 'to', address);
+
+    const options = {
+      protocol: parsed.protocol,
+      hostname: address,  // connect to IP
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method: 'GET',
+      headers: {
+        ...headers,
+        'Host': parsed.hostname,  // important: set original Host for virtual hosting / SNI
+      },
+      family: 4,
+    };
+
+    const proxyReq = lib.get(options, (proxyRes) => {
+      const contentType = proxyRes.headers['content-type'] || '';
+      const isPlaylist = contentType.includes('mpegurl') || contentType.includes('m3u8') || targetUrl.includes('.m3u8');
+
+      if (isPlaylist) {
+        let body = '';
+        proxyRes.on('data', chunk => body += chunk);
+        proxyRes.on('end', () => {
+          const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+          const rewritten = body.split('\n').map(line => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) return line;
+            if (!trimmed.startsWith('http')) {
+              return baseUrl + trimmed;
+            }
+            return line;
+          }).join('\n');
+
+          setCors(res);
+          res.writeHead(200, {
+            'Content-Type': 'application/vnd.apple.mpegurl',
+          });
+          res.end(rewritten);
+        });
+      } else {
+        setCors(res);
+        res.writeHead(proxyRes.statusCode, {
+          'Content-Type': contentType || 'video/mp2t',
+        });
+        proxyRes.pipe(res);
+      }
+    });
+
+    proxyReq.on('error', (err) => {
+      console.error('Proxy fetch error for', targetUrl, err);
+      setCors(res);
+      res.writeHead(502);
+      res.end('Proxy error: ' + err.message);
+    });
   });
 }
 
