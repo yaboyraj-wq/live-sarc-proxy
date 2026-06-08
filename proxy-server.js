@@ -79,32 +79,56 @@ function proxyRequest(targetUrl, clientIp, res) {
   const lib = targetUrl.startsWith('https') ? https : http;
   const parsed = new URL(targetUrl);
 
-  // Pre-resolve with our public DNS and family 4 to bypass container DNS issues
-  dns.lookup(parsed.hostname, { family: 4 }, (lookupErr, address) => {
-    if (lookupErr) {
-      console.error('DNS lookup failed for', parsed.hostname, lookupErr);
-      setCors(res);
-      res.writeHead(502);
-      res.end('Proxy error: DNS lookup failed for ' + parsed.hostname);
-      return;
+  // Robust multi-method resolution. If everything fails, fall back to direct get (some environments resolve in the http layer even if explicit lookup "fails").
+  (async () => {
+    let address = null;
+
+    // 1. Try configured DNS + family 4
+    try {
+      address = await new Promise((resolve, reject) => {
+        dns.lookup(parsed.hostname, { family: 4 }, (err, addr) => err ? reject(err) : resolve(addr));
+      });
+      console.log('Resolved via configured DNS', parsed.hostname, 'to', address);
+    } catch (e) {
+      console.warn('Configured DNS lookup failed for', parsed.hostname, e.message || e);
     }
 
-    console.log('Resolved', parsed.hostname, 'to', address);
+    // 2. Fallback to DoH (application-level, bypasses local resolver)
+    if (!address) {
+      try {
+        const dohRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(parsed.hostname)}&type=A`, {
+          headers: { 'Accept': 'application/dns-json' }
+        });
+        if (dohRes.ok) {
+          const data = await dohRes.json();
+          const ans = (data.Answer || []).find(a => a.type === 1);
+          if (ans && ans.data) {
+            address = ans.data;
+            console.log('Resolved via DoH', parsed.hostname, 'to', address);
+          }
+        }
+      } catch (e) {
+        console.warn('DoH resolve failed for', parsed.hostname, e.message || e);
+      }
+    }
 
-    const options = {
-      protocol: parsed.protocol,
-      hostname: address,  // connect to IP
-      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-      path: parsed.pathname + parsed.search,
-      method: 'GET',
-      headers: {
-        ...headers,
-        'Host': parsed.hostname,  // important: set original Host for virtual hosting / SNI
-      },
-      family: 4,
-    };
+    let getArg = targetUrl;
+    let getOpts = { headers, family: 4 };
 
-    const proxyReq = lib.get(options, (proxyRes) => {
+    if (address) {
+      getArg = undefined;
+      getOpts = {
+        protocol: parsed.protocol,
+        hostname: address,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method: 'GET',
+        headers: { ...headers, 'Host': parsed.hostname },
+        family: 4,
+      };
+    }
+
+    const proxyReq = lib.get(getArg || getOpts, (proxyRes) => {
       const contentType = proxyRes.headers['content-type'] || '';
       const isPlaylist = contentType.includes('mpegurl') || contentType.includes('m3u8') || targetUrl.includes('.m3u8');
 
@@ -143,6 +167,11 @@ function proxyRequest(targetUrl, clientIp, res) {
       res.writeHead(502);
       res.end('Proxy error: ' + err.message);
     });
+  })().catch(err => {
+    console.error('Unexpected error in proxyRequest', err);
+    setCors(res);
+    res.writeHead(502);
+    res.end('Proxy error: ' + err.message);
   });
 }
 
